@@ -38,6 +38,7 @@ on:
           - KowSU
           - ReSukiSU
           - SukiSUUltra
+          - KSUN Hookless+nomount
 
       custom_name:
         description: "kernel"
@@ -262,6 +263,9 @@ jobs:
 
             "SukiSUUltra")
               curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
+              ;;
+            "KSUN Hookless+nomount")
+              curl -LSs "https://raw.githubusercontent.com/MirahSyakilla/KSUN/main/kernel/setup.sh" | bash -s susfs+nomount-hookless
               ;;
           esac
 
