@@ -7,7 +7,7 @@ on:
         description: "Kernel source repo URL (msm-kernel). Paste any git URL here to override the default."
         required: true
         type: string
-        default: "https://github.com/kingD2N/kernel_source_Melt_xiaomi_ingres/tree/melt-rebase-4LazyGoogle"
+        default: "https://github.com/kingD2N/kernel_source_Melt_xiaomi_ingres"
 
       kernel_branch:
         description: "Branch on kernel_source above (independent from modules/devicetree branches below)"
@@ -46,7 +46,7 @@ on:
         default: Melt-Rebase
         options:
           - Melt-Rebase
-          
+
       susfs:
         description: "Add susfs support"
         required: true
@@ -63,6 +63,7 @@ on:
         description: "Add BBG support"
         required: true
         type: boolean
+        default: false
 
       rekernel_netlink:
         description: "Add Re-Kernel support (Netlink)"
@@ -104,6 +105,16 @@ jobs:
       checks: read
     steps:
       - uses: actions/checkout@v4
+
+      - name: Free up disk space
+        run: |
+          # Kernel build + 16GB swap file + multiple repo clones can exceed
+          # the ~14GB free disk on a standard GitHub-hosted runner, causing
+          # "No space left on device" mid-build. Removing preinstalled
+          # toolchains we don't use reclaims tens of GB up front.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force || true
+          df -h
 
       - name: Setup SWAP
         uses: pierotofy/set-swap-space@master
@@ -415,10 +426,10 @@ jobs:
           if [[ "${{ inputs.susfs }}" == true ]]; then
             ZIP_NAME="${ZIP_NAME}_SuSFS"
           fi
-          
-          ZIP_NAME="${KERNEL_NAME}_$(date -u +"%Y%m%d_%H%M")"
+
+          ZIP_NAME="${ZIP_NAME}_$(date -u +"%Y%m%d_%H%M")"
           git clone https://github.com/kingD2N/AnyKernel3.git
-          
+
           cp ${SOC}/out/arch/arm64/boot/Image AnyKernel3/Image
           cp ${SOC}/out/arch/arm64/boot/Image ./Image
           cd AnyKernel3
@@ -468,26 +479,28 @@ jobs:
             droidspaces_checkbox="Unsupported"
           fi
 
-          gh release create "$REL_NAME" --title "$REL_NAME" --notes "# 
+          cat > release_notes.md << NOTES_EOF
+          #
 
-          
-           <img width="1380" height="752" alt="1000339818" src="https://github.com/user-attachments/assets/9c288842-4114-44fd-841f-7ee013dd8094" />
-          
-           | | |
-           |:---|:---|
-           | 📱 Device | POCO F4 GT (ingres) • Redmi K50G (ingres) |
-           | 🟠 ROM Support | Official AOSP/HyperOS |
-           | 🖥️ Kernel Name | ${KERNEL_NAME}
-           | 🧬 Kernel Base | android12-5.10.262 |
-           | 🛠️ Build Scope | ZIP |
-           | 📦 Source | ${{ inputs.kernel_source }} |
-           | ⚔️ Kernel branch | ${{ inputs.kernel_branch }}
-           | 💻 KSU Manager type | ${{ inputs.ksu_type }} 
-           | 🔧 SuSFS Version | ${susfs_checkbox} 
-           | ⚙️ BBG Patch | ${bbg_checkbox} 
-           | ⚙️ Re-Kernel (Netlink) | ${rekernel_netlink_checkbox}
-           | ⚙️ Re-Kernel (eBPF) | ${rekernel_ebpf_checkbox}
-           | 🔨 Compiler | LLVM/Clang 22.1.8 Official |
+          <img width="1380" height="752" alt="1000339818" src="https://github.com/user-attachments/assets/9c288842-4114-44fd-841f-7ee013dd8094" />
 
-           ---
-          " "${ASSETS[@]}"
+          | | |
+          |:---|:---|
+          | 📱 Device | POCO F4 GT (ingres) • Redmi K50G (ingres) |
+          | 🟠 ROM Support | Official AOSP/HyperOS |
+          | 🖥️ Kernel Name | ${KERNEL_NAME} |
+          | 🧬 Kernel Base | android12-5.10.262 |
+          | 🛠️ Build Scope | ZIP |
+          | 📦 Source | ${{ inputs.kernel_source }} |
+          | ⚔️ Kernel branch | ${{ inputs.kernel_branch }} |
+          | 💻 KSU Manager type | ${{ inputs.ksu_type }} |
+          | 🔧 SuSFS Version | ${susfs_checkbox} |
+          | ⚙️ BBG Patch | ${bbg_checkbox} |
+          | ⚙️ Re-Kernel (Netlink) | ${rekernel_netlink_checkbox} |
+          | ⚙️ Re-Kernel (eBPF) | ${rekernel_ebpf_checkbox} |
+          | 🔨 Compiler | LLVM/Clang 22.1.8 Official |
+
+          ---
+          NOTES_EOF
+
+          gh release create "$REL_NAME" --title "$REL_NAME" --notes-file release_notes.md "${ASSETS[@]}"
