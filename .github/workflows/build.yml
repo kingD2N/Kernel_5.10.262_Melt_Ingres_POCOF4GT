@@ -1,0 +1,493 @@
+name: Compile Kernel Melt Rebase - POCO F4 GT (Ingres)
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_source:
+        description: "Kernel source repo URL (msm-kernel). Paste any git URL here to override the default."
+        required: true
+        type: string
+        default: "https://github.com/kingD2N/kernel_source_Melt_xiaomi_ingres/tree/melt-rebase-4LazyGoogle"
+
+      kernel_branch:
+        description: "Branch on kernel_source above (independent from modules/devicetree branches below)"
+        required: true
+        type: string
+        default: "melt-rebase-4LazyGoogle"
+
+      modules_branch:
+        description: "Branch for the LineageOS modules repo (unaffected by kernel_source/kernel_branch above - currently defaults to lineage-23.2)"
+        required: true
+        type: string
+        default: "lineage-23.2"
+
+      devicetree_branch:
+        description: "Branch for the Ingres-Centre devicetrees repo (this repo currently defaults to lineage-23.0, NOT lineage-23.2 - double check before running)"
+        required: true
+        type: string
+        default: "lineage-23.2"
+
+      ksu_type:
+        description: "KernelSU Version"
+        required: true
+        type: choice
+        options:
+          - None
+          - Official-KernelSU
+          - KernelSU-Next
+          - KowSU
+          - ReSukiSU
+          - SukiSUUltra
+
+      custom_name:
+        description: "kernel"
+        required: false
+        type: choice
+        default: Melt-Rebase
+        options:
+          - Melt-Rebase
+          
+      susfs:
+        description: "Add susfs support"
+        required: true
+        type: boolean
+        default: false
+
+      susfs_commit:
+        description: "Custom commit SHA for susfs4ksu (optional; leave empty to use the latest commit on gki-android12-5.10)"
+        required: false
+        type: string
+        default: ""
+
+      BBG:
+        description: "Add BBG support"
+        required: true
+        type: boolean
+
+      rekernel_netlink:
+        description: "Add Re-Kernel support (Netlink)"
+        required: true
+        type: boolean
+        default: false
+
+      rekernel_ebpf:
+        description: "Add Re-Kernel support (eBPF)"
+        required: true
+        type: boolean
+        default: false
+
+      droidspaces:
+        description: "Add DroidSpaces support"
+        required: true
+        type: boolean
+        default: false
+
+      ccache_update:
+        description: "Refresh ccache (overwrite the repo cache with this build's ccache; enable when u changed configs/source or need a clean cache)"
+        required: true
+        type: boolean
+        default: false
+
+
+jobs:
+  Build_Kernel:
+    env:
+        GH_TOKEN: ${{ github.token }}
+        SOC: sm8450
+        CCACHE_KEY: ccache-ecsv3-ingres-sm8450
+        # Public link of your Telegram group (shown as "JOIN" button in the push).
+        TG_GROUP_URL: ""
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+      checks: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup SWAP
+        uses: pierotofy/set-swap-space@master
+        with:
+          swap-size-gb: 16
+
+      - name: Install build dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y \
+          bc bison flex \
+          libssl-dev \
+          libelf-dev \
+          libdw-dev \
+          build-essential \
+          lz4 \
+          git \
+          python3 \
+          curl \
+          dwarves \
+          cpio \
+          ccache \
+          zstd \
+          unzip \
+          gcc-aarch64-linux-gnu
+
+      - name: Clone Kernel Source
+        run: |
+          git clone --depth=1 -b ${{ inputs.kernel_branch }} ${{ inputs.kernel_source }} ${SOC}
+          git clone --depth=1 -b ${{ inputs.modules_branch }} https://github.com/LineageOS/android_kernel_xiaomi_${SOC}-modules.git ${SOC}-modules
+
+          # The Ingres-Centre devicetrees fork currently defaults to a different
+          # branch than the kernel/modules repos above (lineage-23.0 vs lineage-23.2),
+          # so try the requested branch first and fall back to the repo's own
+          # default branch if it isn't there. This mirrors the LineageOS kernel
+          # manifest path for this repo: arch/arm64/boot/dts/vendor.
+          rm -rf ${SOC}/arch/arm64/boot/dts/vendor
+          git clone --depth=1 -b ${{ inputs.devicetree_branch }} https://github.com/Ingres-Centre/android_kernel_xiaomi_${SOC}-devicetrees.git ${SOC}/arch/arm64/boot/dts/vendor \
+            || git clone --depth=1 https://github.com/Ingres-Centre/android_kernel_xiaomi_${SOC}-devicetrees.git ${SOC}/arch/arm64/boot/dts/vendor
+
+      - name: Download LLVM 22.1.8
+        run: |
+          mkdir -p toolchains
+          cd toolchains
+          wget -q https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/LLVM-22.1.8-Linux-X64.tar.xz
+          mkdir llvm-22.1.8
+          tar -xf LLVM-22.1.8-Linux-X64.tar.xz -C llvm-22.1.8 --strip-components=1
+
+      # ---- ccache-ECS (cctv18 style layered ccache) ----
+      - name: Configure ccache dir and key
+        run: |
+          echo "CCACHE_DIR=$HOME/.ccache_ingres" >> $GITHUB_ENV
+          echo "CCACHE_MAXSIZE=3G" >> $GITHUB_ENV
+          if [[ "${{ inputs.droidspaces }}" == true ]]; then
+            CCACHE_REAL_KEY=${CCACHE_KEY}-Droidspaces
+          else
+            CCACHE_REAL_KEY=${CCACHE_KEY}-none
+          fi
+          echo "CCACHE_REAL_KEY=$CCACHE_REAL_KEY" >> $GITHUB_ENV
+
+      - name: Purge old ccache (on refresh)
+        if: ${{ inputs.ccache_update }}
+        continue-on-error: true
+        run: |
+          echo "Deleting old repo ccache to force a fresh save..."
+          gh cache delete "${CCACHE_REAL_KEY}-${{ runner.os }}-${{ inputs.kernel_branch }}" -R ${{ github.repository }} || echo "No old ccache to delete"
+
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        id: ccache-restore
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ env.CCACHE_REAL_KEY }}-${{ runner.os }}-${{ inputs.kernel_branch }}
+          restore-keys: |
+            ${{ env.CCACHE_REAL_KEY }}-${{ runner.os }}-
+            ${{ env.CCACHE_REAL_KEY }}-
+
+      - name: Compile Kernel
+        run: |
+          CLANG_ROOT="${GITHUB_WORKSPACE}/toolchains/llvm-22.1.8/bin"
+          export PATH="${CLANG_ROOT}:$PATH"
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export LLVM=1
+          export LLVM_IAS=1
+          export CC="${CLANG_ROOT}/clang"
+          export CXX="${CLANG_ROOT}/clang++"
+          export HOSTCC="${CLANG_ROOT}/clang"
+          export HOSTCXX="${CLANG_ROOT}/clang++"
+          export LD="${CLANG_ROOT}/ld.lld"
+          export AR="${CLANG_ROOT}/llvm-ar"
+          export NM="${CLANG_ROOT}/llvm-nm"
+          export OBJCOPY="${CLANG_ROOT}/llvm-objcopy"
+          export OBJDUMP="${CLANG_ROOT}/llvm-objdump"
+          export STRIP="${CLANG_ROOT}/llvm-strip"
+          export KBUILD_BUILD_USER="KingD2N"
+          export KBUILD_BUILD_HOST="Ingres"
+
+          # ccache-ECS tuning: normalize paths/timestamps so cache hits across runs
+          export CCACHE_COMPILERCHECK="none"
+          export CCACHE_BASEDIR="${GITHUB_WORKSPACE}"
+          export CCACHE_NOHASHDIR="true"
+          export CCACHE_NOHARDLINK="true"
+          mkdir -p "${CCACHE_DIR}"
+          echo "sloppiness = file_stat_matches,include_file_ctime,include_file_mtime,pch_defines,file_macro,time_macros" >> "${CCACHE_DIR}/ccache.conf"
+          ccache -M "${CCACHE_MAXSIZE}"
+          ccache -o compression=true
+          echo "ccache status before build:"
+          ccache -s
+
+          if [[ -n "${{ inputs.custom_name }}" ]]; then
+            KERNEL_NAME="${{ inputs.custom_name }}"
+          else
+            KERNEL_NAME="${{ inputs.ksu_type }}"
+          fi
+
+          echo "KERNEL_NAME=${KERNEL_NAME}" >> $GITHUB_ENV
+
+          cd ${SOC}
+
+          case "${{ inputs.ksu_type }}" in
+
+            "None")
+              ;;
+
+            "Official-KernelSU")
+              curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
+              ;;
+
+            "KowSU")
+               curl -LSs "https://raw.githubusercontent.com/KOWX712/KernelSU/main/kernel/setup.sh" | bash -s master
+              ;;
+
+            "KernelSU-Next")
+              if [[ "${{ inputs.susfs }}" == true ]]; then
+                curl -LSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/refs/heads/dev-susfs/kernel/setup.sh" | bash -s dev-susfs
+              else
+                curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s dev
+              fi
+              ;;
+
+            "ReSukiSU")
+              curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
+              ;;
+
+            "SukiSUUltra")
+              curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
+              ;;
+          esac
+
+          if [[ "${{ inputs.susfs }}" == true ]]; then
+            # Full clone (no --depth) so any commit in this branch's history
+            # can be checked out below, not just the branch tip. If
+            # susfs_commit is left empty, we just stay on the tip (latest).
+            git clone -b gki-android12-5.10 https://gitlab.com/simonpunk/susfs4ksu.git susfs
+            cd susfs
+
+            if [[ -n "${{ inputs.susfs_commit }}" ]]; then
+              echo "==> SUSFS: pinning to custom commit ${{ inputs.susfs_commit }}"
+              git checkout "${{ inputs.susfs_commit }}"
+            else
+              echo "==> SUSFS: using latest commit on branch gki-android12-5.10"
+            fi
+
+            SUSFS_COMMIT=$(git rev-parse --short HEAD)
+            echo "SUSFS_COMMIT=${SUSFS_COMMIT}" >> $GITHUB_ENV
+            echo "==> SUSFS: checked out commit ${SUSFS_COMMIT}"
+            cp ./kernel_patches/50_add_susfs_in_gki-android12-5.10.patch ..
+            cp ./kernel_patches/fs/* ../fs/
+            cp ./kernel_patches/include/linux/* ../include/linux/
+            cd ..
+            patch -p1 < 50_add_susfs_in_gki-android12-5.10.patch
+            echo "CONFIG_KSU_SUSFS=y" >> arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_SUS_MAP=y" >> arch/arm64/configs/gki_defconfig
+          fi
+
+          if [[ "${{ inputs.BBG }}" == true ]]; then
+            wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
+            echo "CONFIG_BBG=y" >> arch/arm64/configs/gki_defconfig
+            sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
+          fi
+
+          if [[ "${{ inputs.rekernel_netlink }}" == true ]]; then
+            git clone --depth=1 https://github.com/Sakion-Team/Re-Kernel.git rekernel-src
+            bash rekernel-src/Integrate/patches.sh
+            echo "CONFIG_REKERNEL=y" >> arch/arm64/configs/gki_defconfig
+            echo "CONFIG_REKERNEL_NETWORK=y" >> arch/arm64/configs/gki_defconfig
+          fi
+
+          if [[ "${{ inputs.rekernel_ebpf }}" == true ]]; then
+            # Prereqs for the "Build Re-Kernel (eBPF)" step below: BTF so
+            # bpftool can dump a vmlinux.h from our own out/vmlinux (needs
+            # DEBUG_INFO_BTF; pahole/dwarves is already installed in the deps
+            # step above), plus the syscall/JIT/kprobe+uprobe/cgroup+tc attach
+            # points the eBPF program itself needs. Nothing else touches the
+            # kernel source/defconfig here — the eBPF build itself happens
+            # later, once out/vmlinux exists, and doesn't patch binder.c, so
+            # it's safe to run alongside Netlink above.
+            echo "CONFIG_BPF_SYSCALL=y" >> arch/arm64/configs/gki_defconfig
+            echo "CONFIG_BPF_JIT=y" >> arch/arm64/configs/gki_defconfig
+            echo "CONFIG_CGROUP_BPF=y" >> arch/arm64/configs/gki_defconfig
+            echo "CONFIG_BPF_EVENTS=y" >> arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KPROBES=y" >> arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KPROBE_EVENTS=y" >> arch/arm64/configs/gki_defconfig
+            echo "CONFIG_UPROBE_EVENTS=y" >> arch/arm64/configs/gki_defconfig
+            echo "CONFIG_NET_CLS_ACT=y" >> arch/arm64/configs/gki_defconfig
+            echo "CONFIG_NET_CLS_BPF=y" >> arch/arm64/configs/gki_defconfig
+            echo "CONFIG_NET_ACT_BPF=y" >> arch/arm64/configs/gki_defconfig
+            echo "CONFIG_NET_SCH_INGRESS=y" >> arch/arm64/configs/gki_defconfig
+            echo "CONFIG_DEBUG_INFO=y" >> arch/arm64/configs/gki_defconfig
+            echo "CONFIG_DEBUG_INFO_BTF=y" >> arch/arm64/configs/gki_defconfig
+            echo "CONFIG_DEBUG_INFO_BTF_MODULES=y" >> arch/arm64/configs/gki_defconfig
+            echo "==> Re-Kernel eBPF selected; will build after the kernel Image is ready."
+          fi
+
+          DROIDSPACES_CONFIG=""
+          if [[ "${{ inputs.droidspaces }}" == true ]]; then
+            # ingres (sm8450) ships GKI kernel 5.10 -> DroidSpaces 5.10 patch path
+            curl -Lo patch-for-below-6.12.patch https://raw.githubusercontent.com/ravindu644/Droidspaces-OSS/refs/heads/main/Documentation/resources/kernel-patches/GKI/below-kernel-6.12/001.GKI-below-6.12-fix_sysvipc_kabi_6_7_8.patch
+            patch -p1 < patch-for-below-6.12.patch
+
+            curl -Lo patch-for-5.10-or-lower.patch https://raw.githubusercontent.com/ravindu644/Droidspaces-OSS/refs/heads/main/Documentation/resources/kernel-patches/GKI/below-kernel-6.12/002.5.10_or_lower_use_android_abi_padding_for_posix_mqueue.patch
+            patch -p1 < patch-for-5.10-or-lower.patch
+
+            cp ${GITHUB_WORKSPACE}/configs/droidspaces-gki.config arch/arm64/configs/vendor/droidspaces.config
+            DROIDSPACES_CONFIG="vendor/droidspaces.config"
+          fi
+
+          echo "-${KERNEL_NAME}-${{ github.actor }}" > .scmversion
+
+          echo "CONFIG_TMPFS_XATTR=y" >> arch/arm64/configs/gki_defconfig
+
+          make O=out gki_defconfig vendor/waipio_GKI.config vendor/xiaomi_GKI.config vendor/ingres_GKI.config vendor/debugfs.config ${DROIDSPACES_CONFIG}
+
+          # ccache must be injected via make command-line CC (LLVM=1 overrides the env CC otherwise)
+          make -j2 O=out CC="ccache ${CLANG_ROOT}/clang" HOSTCC="ccache ${CLANG_ROOT}/clang" Image
+
+          echo "ccache status after build:"
+          ccache -s
+
+      - name: Save ccache
+        if: ${{ always() && steps.ccache-restore.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ env.CCACHE_REAL_KEY }}-${{ runner.os }}-${{ inputs.kernel_branch }}
+
+      - name: Build Re-Kernel (eBPF)
+        if: ${{ inputs.rekernel_ebpf }}
+        run: |
+          set -e
+
+          # Everything downloaded/extracted for this step lives under its own
+          # subfolder so it never touches $GITHUB_WORKSPACE's root — a stray
+          # *.zip there (e.g. the NDK archive) would break the `ls *.zip`
+          # glob the release step uses to find the kernel zip.
+          mkdir -p rekernel-ebpf-build
+          cd rekernel-ebpf-build
+
+          # ---- Host bpftool (static, decoupled from the runner's own kernel) ----
+          # Used to dump BTF type info from the vmlinux we just built into a C header.
+          curl -sSL -o bpftool.tar.gz \
+            https://github.com/libbpf/bpftool/releases/download/v7.5.0/bpftool-v7.5.0-amd64.tar.gz
+          mkdir -p bpftool-bin
+          tar -xzf bpftool.tar.gz -C bpftool-bin
+          chmod +x bpftool-bin/bpftool
+
+          # ---- Android NDK r27d (eBPF-Source/Makefile's default NDK toolchain) ----
+          wget -q https://dl.google.com/android/repository/android-ndk-r27d-linux.zip
+          unzip -q android-ndk-r27d-linux.zip
+
+          # ---- Fetch only the eBPF-Source subfolder from Re-Kernel ----
+          git clone --depth=1 --filter=blob:none --sparse \
+            https://github.com/Sakion-Team/Re-Kernel.git rekernel-ebpf-src
+          cd rekernel-ebpf-src
+          git sparse-checkout set eBPF-Source
+          cd eBPF-Source
+
+          # ---- Device-specific vmlinux.h, from the kernel we just built ----
+          # (README says pull /sys/kernel/btf/vmlinux off a running device; using
+          # our own freshly-built vmlinux is equivalent and exactly matches what
+          # will actually be flashed).
+          "${GITHUB_WORKSPACE}/rekernel-ebpf-build/bpftool-bin/bpftool" btf dump file \
+            "${GITHUB_WORKSPACE}/${SOC}/out/vmlinux" format c > include/vmlinux.h
+
+          NDK_PATH="${GITHUB_WORKSPACE}/rekernel-ebpf-build/android-ndk-r27d"
+
+          if ! make ARCH=aarch64 API=35 NDK_PATH="${NDK_PATH}"; then
+            echo "::warning::Re-Kernel eBPF build failed with plain vmlinux.h — retrying with EXTRA_BPF_CFLAGS=-DRK_DEFINE_BINDER_TYPES (binder structs may be missing from our BTF dump)."
+            make clean
+            make ARCH=aarch64 API=35 NDK_PATH="${NDK_PATH}" EXTRA_BPF_CFLAGS=-DRK_DEFINE_BINDER_TYPES
+          fi
+
+          mkdir -p "${GITHUB_WORKSPACE}/rekernel-ebpf-out"
+          cp out/rekernel.bpf.o "${GITHUB_WORKSPACE}/rekernel-ebpf-out/"
+          cp out/rekerneld_aarch64 "${GITHUB_WORKSPACE}/rekernel-ebpf-out/"
+
+      - name: Make AnyKernel3
+        run: |
+          ZIP_NAME="${KERNEL_NAME}_${{ inputs.ksu_type }}"
+
+          if [[ "${{ inputs.susfs }}" == true ]]; then
+            ZIP_NAME="${ZIP_NAME}_SuSFS"
+          fi
+          
+          ZIP_NAME="${KERNEL_NAME}_$(date -u +"%Y%m%d_%H%M")"
+          git clone https://github.com/kingD2N/AnyKernel3.git
+          
+          cp ${SOC}/out/arch/arm64/boot/Image AnyKernel3/Image
+          cp ${SOC}/out/arch/arm64/boot/Image ./Image
+          cd AnyKernel3
+
+          zip -r9 ../"${ZIP_NAME}.zip" * -x .git
+
+      - name: Create GitHub Release
+        run: |
+          BUILD_TIME=$(date -u +"%Y%m%d_%H%M")
+          REL_NAME="${KERNEL_NAME}-${BUILD_TIME}"
+          echo "REL_NAME=${REL_NAME}" >> $GITHUB_ENV
+          cd ${GITHUB_WORKSPACE}
+          ZIP_FILE=$(ls *.zip)
+
+          ASSETS=("${ZIP_FILE}")
+          if [[ "${{ inputs.rekernel_ebpf }}" == true ]]; then
+            ASSETS+=("rekernel-ebpf-out/rekernel.bpf.o" "rekernel-ebpf-out/rekerneld_aarch64")
+          fi
+
+          if [[ "${{ inputs.susfs }}" == true ]]; then
+            susfs_checkbox="Supported (susfs4ksu@${SUSFS_COMMIT})"
+          else
+            susfs_checkbox="Unsupported"
+          fi
+
+          if [[ "${{ inputs.BBG }}" == true ]]; then
+            bbg_checkbox="Supported"
+          else
+            bbg_checkbox="Unsupported"
+          fi
+
+          if [[ "${{ inputs.rekernel_netlink }}" == true ]]; then
+            rekernel_netlink_checkbox="Supported"
+          else
+            rekernel_netlink_checkbox="Unsupported"
+          fi
+
+          if [[ "${{ inputs.rekernel_ebpf }}" == true ]]; then
+            rekernel_ebpf_checkbox="Supported (daemon+prog attached as release assets)"
+          else
+            rekernel_ebpf_checkbox="Unsupported"
+          fi
+
+          if [[ "${{ inputs.droidspaces }}" == true ]]; then
+            droidspaces_checkbox="Supported"
+          else
+            droidspaces_checkbox="Unsupported"
+          fi
+
+          gh release create "$REL_NAME" --title "$REL_NAME" --notes "# 
+
+          
+           <img width="1380" height="752" alt="1000339818" src="https://github.com/user-attachments/assets/9c288842-4114-44fd-841f-7ee013dd8094" />
+          
+           | | |
+           |:---|:---|
+           | 📱 Device | POCO F4 GT (ingres) • Redmi K50G (ingres) |
+           | 🟠 ROM Support | Official AOSP/HyperOS |
+           | 🖥️ Kernel Name | ${KERNEL_NAME}
+           | 🧬 Kernel Base | android12-5.10.262 |
+           | 🛠️ Build Scope | ZIP |
+           | 📦 Source | ${{ inputs.kernel_source }} |
+           | ⚔️ Kernel branch | ${{ inputs.kernel_branch }}
+           | 💻 KSU Manager type | ${{ inputs.ksu_type }} 
+           | 🔧 SuSFS Version | ${susfs_checkbox} 
+           | ⚙️ BBG Patch | ${bbg_checkbox} 
+           | ⚙️ Re-Kernel (Netlink) | ${rekernel_netlink_checkbox}
+           | ⚙️ Re-Kernel (eBPF) | ${rekernel_ebpf_checkbox}
+           | 🔨 Compiler | LLVM/Clang 22.1.8 Official |
+
+           ---
+          " "${ASSETS[@]}"
