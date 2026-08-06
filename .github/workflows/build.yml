@@ -31,6 +31,7 @@ on:
         description: "KernelSU Version"
         required: true
         type: choice
+        default: "KernelSU-Next"
         options:
           - None
           - Official-KernelSU
@@ -57,29 +58,29 @@ on:
         description: "Custom commit SHA for susfs4ksu (optional; leave empty to use the latest commit on gki-android12-5.10)"
         required: false
         type: string
-        default: ""
+        default: "86bb893e9a103b97d17045306f35eb239a623f2a"
 
       BBG:
         description: "Add BBG support"
         required: true
         type: boolean
-        default: false
+        default: true
 
       rekernel_netlink:
         description: "Add Re-Kernel support (Netlink)"
         required: true
         type: boolean
-        default: false
+        default: true
 
       rekernel_ebpf:
         description: "Add Re-Kernel support (eBPF)"
         required: true
         type: boolean
-        default: false
+        default: true
 
       droidspaces:
         description: "Add DroidSpaces support"
-        required: true
+        required: false
         type: boolean
         default: false
 
@@ -87,7 +88,7 @@ on:
         description: "Refresh ccache (overwrite the repo cache with this build's ccache; enable when u changed configs/source or need a clean cache)"
         required: true
         type: boolean
-        default: false
+        default: true
 
 
 jobs:
