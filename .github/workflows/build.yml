@@ -52,7 +52,7 @@ on:
         description: "Add susfs support"
         required: true
         type: boolean
-        default: false
+        default: true
 
       susfs_commit:
         description: "Custom commit SHA for susfs4ksu (optional; leave empty to use the latest commit on gki-android12-5.10)"
