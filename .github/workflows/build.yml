@@ -357,6 +357,39 @@ jobs:
 
           make O=out gki_defconfig vendor/waipio_GKI.config vendor/xiaomi_GKI.config vendor/ingres_GKI.config vendor/debugfs.config ${DROIDSPACES_CONFIG}
 
+          echo "::group::Sanity-check defconfig (savedefconfig)"
+          # `make <fragments>` di atas cuma nge-merge & nulis .config mentah.
+          # savedefconfig di sini yang beneran nyuruh Kconfig resolve semua
+          # dependency (select/depends on), dan otomatis buang symbol yang
+          # gak valid/gak eksis di tree ini. Kalau ada config yang kita mau
+          # (misal tuning gaming) ternyata ke-drop, ketauan DI SINI - bukan
+          # setelah nunggu 1-2 jam `make Image` kelar.
+          make O=out savedefconfig
+          cp out/defconfig "${GITHUB_WORKSPACE}/resolved_defconfig.txt"
+
+          echo "--- Cek symbol kunci ingres / tuning gaming tetap ke-resolve ---"
+          for cfg in \
+            CONFIG_ARCH_QCOM \
+            CONFIG_ARCH_WAIPIO \
+            CONFIG_SCHED_WALT \
+            CONFIG_QCOM_KGSL \
+            CONFIG_BINDER_PRIO \
+            CONFIG_MQ_IOSCHED_KYBER \
+            CONFIG_MQ_IOSCHED_DEADLINE \
+            CONFIG_HZ_500 \
+            CONFIG_KSU_SUSFS \
+            CONFIG_BBG \
+            CONFIG_REKERNEL \
+          ; do
+            hit=$(grep "^${cfg}=" out/defconfig || true)
+            if [[ -n "$hit" ]]; then
+              echo "✅ ${hit}"
+            else
+              echo "⚠️  ${cfg} tidak ada di hasil resolve (dependency belum kepenuhi, atau symbol memang gak ada di tree ini - cek manual kalau ini config yang kamu harap ada)"
+            fi
+          done
+          echo "::endgroup::"
+
           # ccache must be injected via make command-line CC (LLVM=1 overrides the env CC otherwise)
           make -j2 O=out CC="ccache ${CLANG_ROOT}/clang" HOSTCC="ccache ${CLANG_ROOT}/clang" Image
 
@@ -369,6 +402,14 @@ jobs:
         with:
           path: ${{ env.CCACHE_DIR }}
           key: ${{ env.CCACHE_REAL_KEY }}-${{ runner.os }}-${{ inputs.kernel_branch }}
+
+      - name: Upload resolved defconfig (debug artifact)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: resolved-defconfig-${{ inputs.ksu_type }}
+          path: resolved_defconfig.txt
+          if-no-files-found: warn
 
       - name: Build Re-Kernel (eBPF)
         if: ${{ inputs.rekernel_ebpf }}
