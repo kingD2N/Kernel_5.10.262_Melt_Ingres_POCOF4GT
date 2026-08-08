@@ -58,7 +58,7 @@ on:
         description: "Custom commit SHA for susfs4ksu (optional; leave empty to use the latest commit on gki-android12-5.10)"
         required: false
         type: string
-        default: "86bb893e9a103b97d17045306f35eb239a623f2a"
+        default: ""
 
       BBG:
         description: "Add BBG support"
